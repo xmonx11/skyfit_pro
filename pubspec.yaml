@@ -1,0 +1,47 @@
+name: skyfit_pro
+description: SkyFit Pro — Weather-aware fitness app built on Flutter Web.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # ── State management ──────────────────────────────────────────────────────
+  provider: ^6.1.2
+
+  # ── Firebase (upgraded to v3) ─────────────────────────────────────────────
+  firebase_core: ^3.6.0
+  firebase_auth: ^5.3.0
+  cloud_firestore: ^5.4.0
+  google_sign_in: ^6.2.1
+  firebase_storage: ^12.3.0
+  image_picker: ^1.1.2
+
+  # ── Secure storage ────────────────────────────────────────────────────────
+  flutter_secure_storage: ^9.2.2
+
+  # ── Biometrics ────────────────────────────────────────────────────────────
+  local_auth: ^2.3.0
+
+  # ── HTTP ──────────────────────────────────────────────────────────────────
+  http: ^1.2.1
+
+  # ── Utilities ─────────────────────────────────────────────────────────────
+  intl: ^0.19.0
+
+  # ── Video Player (mobile only) ────────────────────────────────────────────
+  youtube_player_flutter: ^9.1.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  mockito: ^5.4.4
+  build_runner: ^2.4.11
+
+flutter:
+  uses-material-design: true

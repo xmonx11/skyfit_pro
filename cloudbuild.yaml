@@ -1,0 +1,141 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SkyFit Pro — Google Cloud Build Pipeline
+#
+# Triggers:
+#   - Push to `main` → deploy to production (Cloud Run)
+#   - Push to `develop` → build + test only (no deploy)
+#
+# Prerequisites:
+#   1. Enable APIs: Cloud Build, Cloud Run, Artifact Registry, Secret Manager
+#   2. Grant Cloud Build SA roles:
+#        - roles/run.admin
+#        - roles/iam.serviceAccountUser
+#        - roles/artifactregistry.writer
+#        - roles/secretmanager.secretAccessor
+#   3. Store all secrets in Secret Manager (see substitutions below)
+#
+# Usage:
+#   gcloud builds submit --config=cloudbuild.yaml \
+#     --substitutions=_REGION=us-central1,_SERVICE_NAME=skyfit-pro
+# ─────────────────────────────────────────────────────────────────────────────
+
+substitutions:
+  _REGION: us-central1
+  _SERVICE_NAME: skyfit-pro
+  _REPO_NAME: skyfit-pro-repo
+  _IMAGE: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_SERVICE_NAME}
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/${PROJECT_ID}/secrets/OPENWEATHER_API_KEY/versions/latest
+      env: OPENWEATHER_API_KEY
+    - versionName: projects/${PROJECT_ID}/secrets/FIREBASE_API_KEY/versions/latest
+      env: FIREBASE_API_KEY
+    - versionName: projects/${PROJECT_ID}/secrets/FIREBASE_AUTH_DOMAIN/versions/latest
+      env: FIREBASE_AUTH_DOMAIN
+    - versionName: projects/${PROJECT_ID}/secrets/FIREBASE_PROJECT_ID/versions/latest
+      env: FIREBASE_PROJECT_ID
+    - versionName: projects/${PROJECT_ID}/secrets/FIREBASE_STORAGE_BUCKET/versions/latest
+      env: FIREBASE_STORAGE_BUCKET
+    - versionName: projects/${PROJECT_ID}/secrets/FIREBASE_MESSAGING_SENDER_ID/versions/latest
+      env: FIREBASE_MESSAGING_SENDER_ID
+    - versionName: projects/${PROJECT_ID}/secrets/FIREBASE_APP_ID/versions/latest
+      env: FIREBASE_APP_ID
+
+steps:
+  # ── Step 1: Create Artifact Registry repo (idempotent) ───────────────────
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: create-registry
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gcloud artifacts repositories describe ${_REPO_NAME} \
+          --location=${_REGION} --project=${PROJECT_ID} 2>/dev/null || \
+        gcloud artifacts repositories create ${_REPO_NAME} \
+          --repository-format=docker \
+          --location=${_REGION} \
+          --description="SkyFit Pro Docker images" \
+          --project=${PROJECT_ID}
+
+  # ── Step 2: Build Docker image ────────────────────────────────────────────
+  - name: gcr.io/cloud-builders/docker
+    id: build-image
+    secretEnv:
+      - OPENWEATHER_API_KEY
+      - FIREBASE_API_KEY
+      - FIREBASE_AUTH_DOMAIN
+      - FIREBASE_PROJECT_ID
+      - FIREBASE_STORAGE_BUCKET
+      - FIREBASE_MESSAGING_SENDER_ID
+      - FIREBASE_APP_ID
+    args:
+      - build
+      - --tag=${_IMAGE}:${SHORT_SHA}
+      - --tag=${_IMAGE}:latest
+      - --build-arg=OPENWEATHER_API_KEY=$$OPENWEATHER_API_KEY
+      - --build-arg=FIREBASE_API_KEY=$$FIREBASE_API_KEY
+      - --build-arg=FIREBASE_AUTH_DOMAIN=$$FIREBASE_AUTH_DOMAIN
+      - --build-arg=FIREBASE_PROJECT_ID=$$FIREBASE_PROJECT_ID
+      - --build-arg=FIREBASE_STORAGE_BUCKET=$$FIREBASE_STORAGE_BUCKET
+      - --build-arg=FIREBASE_MESSAGING_SENDER_ID=$$FIREBASE_MESSAGING_SENDER_ID
+      - --build-arg=FIREBASE_APP_ID=$$FIREBASE_APP_ID
+      - --cache-from=${_IMAGE}:latest
+      - .
+
+  # ── Step 3: Push image to Artifact Registry ───────────────────────────────
+  - name: gcr.io/cloud-builders/docker
+    id: push-image
+    args:
+      - push
+      - --all-tags
+      - ${_IMAGE}
+
+  # ── Step 4: Deploy to Cloud Run ───────────────────────────────────────────
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: deploy-cloudrun
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE_NAME}
+      - --image=${_IMAGE}:${SHORT_SHA}
+      - --region=${_REGION}
+      - --platform=managed
+      - --allow-unauthenticated
+      - --port=8080
+      - --memory=512Mi
+      - --cpu=1
+      - --min-instances=0
+      - --max-instances=10
+      - --concurrency=80
+      - --timeout=30s
+      - --set-env-vars=ENVIRONMENT=production
+      - --project=${PROJECT_ID}
+
+  # ── Step 5: Print deployed URL ────────────────────────────────────────────
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: print-url
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  ✅ SkyFit Pro deployed successfully!"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        gcloud run services describe ${_SERVICE_NAME} \
+          --region=${_REGION} \
+          --project=${PROJECT_ID} \
+          --format="value(status.url)" | \
+          xargs -I{} echo "  🌐 URL: {}"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+images:
+  - ${_IMAGE}:${SHORT_SHA}
+  - ${_IMAGE}:latest
+
+timeout: 1800s
