@@ -54,4 +54,5 @@ jobs:
           service: skyfit-pro
           region: asia-southeast1
           source: .
-          build_service_account: projects/skyfitpro-b293c/serviceAccounts/github-actions-deployer@skyfitpro-b293c.iam.gserviceaccount.com
+          project_id: skyfitpro-b293c
+          build_service_account: projects/skyfitpro-b293c/serviceAccounts/30679119611@cloudbuild.gserviceaccount.com
