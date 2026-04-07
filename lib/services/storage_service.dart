@@ -47,10 +47,14 @@ class StorageService {
   static const String kLastLoggedInUidKey = 'skyfit_last_logged_in_uid';
   static const String kLastLoggedInNameKey = 'skyfit_last_logged_in_name';
 
-  // FIX GOOGLE BIOMETRIC: Tracks which provider was used to sign in
-  // ('google' or 'email') so biometric re-auth knows which path to take.
-  // Google users have no stored password, so they must re-auth via
-  // GoogleSignIn.signInSilently() instead of signInWithEmailAndPassword().
+  // Tracks which provider was used to sign in ('google' or 'email') so
+  // biometric re-auth knows which path to take. Google users have no stored
+  // password, so they must re-auth via GoogleSignIn.signInSilently() instead
+  // of signInWithEmailAndPassword().
+  //
+  // IMPORTANT: This key must NOT be cleared on sign-out. It must survive
+  // sign-out so biometric re-auth on the next launch still knows whether the
+  // user is a Google or email user.
   static const String kAuthProviderKey = 'skyfit_auth_provider';
 
   // ── Initialisation ────────────────────────────────────────────────────────
@@ -176,9 +180,8 @@ class StorageService {
 
   // ── Auth provider ─────────────────────────────────────────────────────────
 
-  /// FIX GOOGLE BIOMETRIC: Saves the sign-in provider so biometric re-auth
-  /// can choose the correct path ('google' vs 'email').
-  /// Must be called after every successful sign-in.
+  /// Saves the sign-in provider so biometric re-auth can choose the correct
+  /// path ('google' vs 'email'). Must be called after every successful sign-in.
   Future<void> saveAuthProvider(String provider) =>
       write(kAuthProviderKey, provider);
 
@@ -188,14 +191,23 @@ class StorageService {
 
   // ── Session helpers ───────────────────────────────────────────────────────
 
-  /// FIX 2: Returns true if lastActivity is null (missing key) OR expired.
+  /// Returns false if lastActivity is null.
   ///
-  /// Treating null as "expired" means callers only need ONE check instead of
-  /// a separate hasLastActivity() gate. This eliminates the race window where
-  /// signOut() deletes the key but biometric re-auth hasn't written it yet.
+  /// Null means "no previous session / fresh state" — NOT expired.
+  /// Expiry only applies when a timestamp EXISTS but is too old.
+  /// Firebase session validity is the authoritative check in that case.
+  ///
+  /// Previously, null was treated as expired which caused biometric login
+  /// to always fail immediately after logout — because clearSessionActivity()
+  /// deletes the key, making it null on the next app open before the user
+  /// has had a chance to log in again.
   Future<bool> isSessionExpired(Duration timeout) async {
     final lastActivity = await getLastActivity();
-    if (lastActivity == null) return true;
+
+    // null = no previous session (after logout or fresh install).
+    // Not expired — let Firebase decide if the session is valid.
+    if (lastActivity == null) return false;
+
     return DateTime.now().difference(lastActivity) > timeout;
   }
 

@@ -71,6 +71,7 @@ class AuthRepository {
         weightKg: weightKg,
         heightCm: heightCm,
         fitnessGoal: fitnessGoal,
+        isProfileComplete: true,
         createdAt: now,
         updatedAt: now,
       );
@@ -86,9 +87,9 @@ class AuthRepository {
         );
       }
 
-      // FIX 1: Sequential awaits — no Future.wait() for storage writes.
       await _persistSession(firebaseUser, displayName: name);
       await _storage.savePassword(password);
+      await _storage.saveAuthProvider('email');
 
       return AuthResult.success(userModel);
     } on FirebaseAuthException catch (e) {
@@ -127,9 +128,9 @@ class AuthRepository {
             'User profile not found. Please contact support.');
       }
 
-      // FIX 1: Sequential writes — each storage op completes before the next.
       await _persistSession(firebaseUser, displayName: userModel.displayName);
       await _storage.savePassword(password);
+      await _storage.saveAuthProvider('email');
 
       return AuthResult.success(userModel);
     } on FirebaseAuthException catch (e) {
@@ -170,8 +171,9 @@ class AuthRepository {
           photoUrl: firebaseUser.photoURL ?? googleUser.photoUrl,
           age: 0,
           weightKg: 0.0,
-          heightCm: 170.0,
+          heightCm: 0.0,
           fitnessGoal: null,
+          isProfileComplete: false,
           createdAt: now,
           updatedAt: now,
         );
@@ -187,8 +189,14 @@ class AuthRepository {
         });
       }
 
-      // FIX 1: Sequential writes.
       await _persistSession(firebaseUser, displayName: userModel.displayName);
+
+      // Google users have no password — clear any stale stored password
+      // so the biometric flow knows to skip email/password re-authentication
+      // and rely on the existing Firebase session instead.
+      await _storage.clearPassword();
+      await _storage.saveAuthProvider('google');
+
       return AuthResult.success(userModel);
     } on FirebaseAuthException catch (e) {
       return AuthResult.failure(_mapFirebaseAuthError(e));
@@ -206,39 +214,155 @@ class AuthRepository {
 
   Future<String?> getLastLoggedInName() => _storage.getLastLoggedInName();
 
+  Future<String?> getStoredAuthProvider() => _storage.getAuthProvider();
+
   Future<AuthResult> authenticateWithBiometrics() async {
-    // FIX 5: Snapshot credentials BEFORE the biometric prompt opens, because
-    // some OEM GMS implementations fire a spurious Firebase sign-out the moment
-    // the fingerprint UI becomes visible.
     final String? storedEmail = await _storage.getEmail();
     final String? storedPassword = await _storage.getPassword();
     final String? storedUid = await _storage.getLastLoggedInUid();
+    final String? authProvider = await _storage.getAuthProvider();
 
-    // Step 1 – Biometric prompt (fingerprint / FaceID only, no PIN fallback).
+    // Prompt biometric first
     final result = await _localAuth.authenticate(
       localizedReason: 'Authenticate to access SkyFit Pro',
     );
 
     if (!result.success) {
-      return AuthResult.failure(
-          result.message ?? 'Biometric authentication failed.');
+      return AuthResult.biometricFailure(
+        result.error ?? BiometricAuthError.unknown,
+        result.message ?? 'Biometric authentication failed.',
+      );
     }
 
-    // FIX 5 & 1: Write lastActivity IMMEDIATELY after biometric success,
-    // sequentially, so restoreSession() never races this write.
     await _storage.updateLastActivity();
 
-    // Step 2 – Resolve UID from snapshot; do NOT trust _auth.currentUser here.
     final String? uid = _auth.currentUser?.uid ?? storedUid;
     if (uid == null || uid.isEmpty) {
-      return AuthResult.failure(
-          'No saved account found. Please sign in with your password first.');
+      return AuthResult.biometricFailure(
+        BiometricAuthError.noSavedAccount,
+        'No saved account found. Please sign in first.',
+      );
     }
 
-    // Step 3 – Firebase re-auth (GMS may have invalidated the session).
+    // If Firebase session is still active, skip re-authentication entirely —
+    // biometric just unlocks the app.
+    if (_auth.currentUser != null) {
+      final userModel = await _firestore.getUser(uid);
+      if (userModel == null) {
+        return AuthResult.biometricFailure(
+          BiometricAuthError.profileNotFound,
+          'User profile not found.',
+        );
+      }
+      await _storage.saveLastLoggedInName(userModel.displayName);
+      await _storage.saveLastLoggedInUid(uid);
+      await _storage.updateLastActivity();
+      return AuthResult.success(userModel);
+    }
+
+    // ── Firebase session expired — attempt silent re-authentication ──────────
+
+    if (authProvider == 'google') {
+      try {
+        // Attempt 1: standard silent sign-in using cached account.
+        //
+        // ROOT CAUSE FIX: This works only if signOut() did NOT call
+        // _googleSignIn.signOut(). That call destroys the plugin's local
+        // account cache, making signInSilently() permanently return null.
+        // The corrected signOut() below skips _googleSignIn.signOut() when
+        // biometrics is enabled, so the cache survives logout.
+        GoogleSignInAccount? googleUser = await _googleSignIn.signInSilently();
+
+        // Attempt 2: force the plugin to rediscover the device account.
+        // Works after app restarts where the plugin instance is fresh.
+        if (googleUser == null) {
+          googleUser =
+              await _googleSignIn.signInSilently(reAuthenticate: true);
+        }
+
+        // Attempt 3: Last resort — truly silent interactive sign-in.
+        // On Android this uses the account manager to pick the previously
+        // authorised account without any visible UI, provided the OAuth
+        // grant is still valid. On iOS it fails fast with null.
+        if (googleUser == null) {
+          googleUser = await _googleSignIn.signIn().catchError((_) => null);
+
+          // Validate the result: if accessToken is null, the account picker
+          // was shown (biometric contract broken) — reject the result.
+          if (googleUser != null) {
+            final probe = await googleUser.authentication;
+            if (probe.accessToken == null) {
+              googleUser = null;
+            }
+          }
+        }
+
+        if (googleUser == null) {
+          return AuthResult.biometricFailure(
+            BiometricAuthError.googleSessionExpired,
+            'Your Google session has expired. Please sign in with Google again.',
+          );
+        }
+
+        final googleAuth = await googleUser.authentication;
+
+        // Guard: missing accessToken means the OAuth grant was revoked
+        // server-side (e.g. user visited myaccount.google.com and removed
+        // your app). Force a manual re-login.
+        if (googleAuth.accessToken == null) {
+          return AuthResult.biometricFailure(
+            BiometricAuthError.googleSessionExpired,
+            'Google access was revoked. Please sign in with Google again.',
+          );
+        }
+
+        final credential = GoogleAuthProvider.credential(
+          accessToken: googleAuth.accessToken,
+          idToken: googleAuth.idToken,
+        );
+
+        final userCredential = await _auth.signInWithCredential(credential);
+        final firebaseUser = userCredential.user!;
+
+        // Force-refresh the Firebase ID token to ensure it is valid and fresh.
+        final token = await firebaseUser.getIdToken(true);
+        if (token != null) await _storage.saveAccessToken(token);
+        await _storage.saveLastLoggedInUid(firebaseUser.uid);
+        await _storage.updateLastActivity();
+
+        final userModel = await _firestore.getUser(firebaseUser.uid);
+        if (userModel == null) {
+          return AuthResult.biometricFailure(
+            BiometricAuthError.profileNotFound,
+            'User profile not found.',
+          );
+        }
+
+        await _storage.saveLastLoggedInName(userModel.displayName);
+        return AuthResult.success(userModel);
+      } on FirebaseAuthException catch (e) {
+        // Token accepted by Google but rejected by Firebase
+        // (e.g. account deleted, project access revoked).
+        return AuthResult.biometricFailure(
+          BiometricAuthError.googleSessionExpired,
+          _mapFirebaseAuthError(e),
+        );
+      } catch (_) {
+        // Network error, token revoked, or any other unrecoverable error.
+        return AuthResult.biometricFailure(
+          BiometricAuthError.googleSessionExpired,
+          'Your Google session has expired. Please sign in with Google again.',
+        );
+      }
+    }
+
+    // ── Email/password user — re-authenticate via stored credentials ─────────
+
     if (storedEmail == null || storedPassword == null) {
-      return AuthResult.failure(
-          'No saved credentials. Please sign in with your password first.');
+      return AuthResult.biometricFailure(
+        BiometricAuthError.noSavedCredentials,
+        'No saved credentials. Please sign in with your password first.',
+      );
     }
 
     try {
@@ -247,28 +371,27 @@ class AuthRepository {
         password: storedPassword,
       );
 
-      // FIX 1: Sequential writes — each completes before the next.
       final token = await credential.user?.getIdToken();
       if (token != null) await _storage.saveAccessToken(token);
       await _storage.saveEmail(storedEmail);
       await _storage.savePassword(storedPassword);
       if (storedUid != null) await _storage.saveLastLoggedInUid(storedUid);
-
-      // FIX 5: Second updateLastActivity after re-auth ensures the key is
-      // always fresh; eliminates any residual race with isSessionExpired().
       await _storage.updateLastActivity();
     } on FirebaseAuthException catch (_) {
-      return AuthResult.failure(
-          'Session expired. Please sign in with your password first.');
+      return AuthResult.biometricFailure(
+        BiometricAuthError.sessionExpired,
+        'Session expired. Please sign in with your password first.',
+      );
     }
 
-    // Step 4 – Load user profile.
     final userModel = await _firestore.getUser(uid);
     if (userModel == null) {
-      return AuthResult.failure('User profile not found.');
+      return AuthResult.biometricFailure(
+        BiometricAuthError.profileNotFound,
+        'User profile not found.',
+      );
     }
 
-    // Step 5 – Persist name + UID for next launch.
     await _storage.saveLastLoggedInName(userModel.displayName);
     await _storage.saveLastLoggedInUid(uid);
 
@@ -293,8 +416,6 @@ class AuthRepository {
 
   Future<UserModel?> restoreSession() async {
     try {
-      // FIX 2: Wait for Firebase auth state with a generous timeout to handle
-      // OEMs (Oppo, Xiaomi) that initialise Firebase asynchronously.
       User? firebaseUser = _auth.currentUser;
       if (firebaseUser == null) {
         firebaseUser = await _auth
@@ -303,22 +424,15 @@ class AuthRepository {
             .timeout(const Duration(seconds: 4), onTimeout: () => null);
       }
 
-      // No Firebase user → nothing to restore.
       if (firebaseUser == null) return null;
 
-      // FIX 2: Check expiry AFTER confirming Firebase user exists.
-      // isSessionExpired returns true when lastActivity is null, treating
-      // missing key the same as expired — no separate hasLastActivity() gate.
       final isExpired = await isSessionExpired();
-      if (isExpired) {
-        // FIX 2 & 6: Do NOT sign out here — biometric re-auth may be in
-        // progress and may have just written lastActivity. Let AuthViewModel's
-        // session timer handle the forced sign-out.
-        return null;
-      }
+      if (isExpired) return null;
 
-      // FIX 1: Sequential write.
+      // Valid Firebase session — refresh timestamp so next open won't
+      // incorrectly treat a null/stale timestamp as expired.
       await _storage.updateLastActivity();
+
       return _firestore.getUser(firebaseUser.uid);
     } catch (_) {
       return null;
@@ -341,37 +455,48 @@ class AuthRepository {
   Future<void> signOut() async {
     final biometricEnabled = await isBiometricLoginEnabled();
 
-    // FIX 6: Sign out from Firebase FIRST, then clear local storage.
-    // This ensures the Firebase session is definitively ended before any
-    // storage keys are deleted, preventing a narrow window where Firebase
-    // is still "logged in" but local state is partially cleared.
     await _auth.signOut();
-    await _googleSignIn.signOut();
 
-    // FIX 6: Clear auth data AFTER Firebase sign-out is complete.
+    // ✅ ROOT CAUSE FIX:
+    //
+    // GoogleSignIn.signOut() destroys the plugin's locally cached
+    // GoogleSignInAccount AND revokes the device-level OAuth token cache.
+    // After this, signInSilently() always returns null — even with
+    // reAuthenticate: true — because there is no account left to restore.
+    //
+    // When biometric login is enabled, we intentionally skip this call so
+    // the cached account survives sign-out and can be silently recovered
+    // during the next biometric authentication.
+    //
+    // Firebase signOut() above already invalidates the server-side session,
+    // so skipping the Google plugin's signOut() does NOT leave the user
+    // "logged in" anywhere — it only preserves the local account identity
+    // needed for signInSilently() to work.
+    //
+    // When biometric is disabled, full sign-out including Google is correct.
+    if (!biometricEnabled) {
+      await _googleSignIn.signOut();
+    }
+
     await _storage.clearAuthData();
-
-    // FIX 6: Clear session activity AFTER Firebase sign-out.
-    // This is kept separate from clearAuthData() to avoid racing biometric
-    // re-auth (which writes lastActivity) — see StorageService for full notes.
     await _storage.clearSessionActivity();
 
     if (!biometricEnabled) {
       await _storage.clearPassword();
     }
+
+    // NOTE: kAuthProviderKey intentionally NOT cleared on sign-out.
+    // It must survive sign-out so biometric re-auth on next launch
+    // still knows whether the user is a Google or email user.
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────
 
-  /// FIX 1: All storage writes are sequential — no Future.wait().
-  /// Order matters: uid → email → token → lastActivity → lastLoggedInUid → name.
   Future<void> _persistSession(User user, {required String displayName}) async {
     await _storage.saveUid(user.uid);
     await _storage.saveEmail(user.email ?? '');
     final token = await user.getIdToken();
     if (token != null) await _storage.saveAccessToken(token);
-    // lastActivity MUST be written before this call returns, so that any
-    // subsequent isSessionExpired() call sees a valid timestamp.
     await _storage.updateLastActivity();
     await _storage.saveLastLoggedInUid(user.uid);
     await _storage.saveLastLoggedInName(displayName);
@@ -405,17 +530,59 @@ class AuthRepository {
 
 // ── Result type ────────────────────────────────────────────────────────────────
 
+/// Typed biometric error codes — eliminates string matching in AuthViewModel.
+enum BiometricAuthError {
+  /// Biometric hardware/enrollment not available.
+  notAvailable,
+
+  /// No biometrics enrolled on the device.
+  notEnrolled,
+
+  /// Sensor locked out after too many attempts.
+  lockedOut,
+
+  /// Authentication attempt failed (wrong finger, face mismatch, etc.).
+  failed,
+
+  /// User cancelled the biometric prompt.
+  cancelled,
+
+  /// No Firebase / Google session, and stored provider is 'google'.
+  googleSessionExpired,
+
+  /// Firebase session expired for an email/password user.
+  sessionExpired,
+
+  /// No stored email/password credentials found.
+  noSavedCredentials,
+
+  /// No saved account UID found on device.
+  noSavedAccount,
+
+  /// Firestore user profile missing.
+  profileNotFound,
+
+  /// Unknown / unclassified error.
+  unknown,
+}
+
 class AuthResult {
   final bool success;
   final UserModel? user;
   final String? errorMessage;
   final String? successMessage;
 
+  /// Typed biometric error — non-null only when the failure originated
+  /// from the biometric authentication path. Use this in AuthViewModel
+  /// instead of string-matching errorMessage.
+  final BiometricAuthError? biometricError;
+
   const AuthResult._({
     required this.success,
     this.user,
     this.errorMessage,
     this.successMessage,
+    this.biometricError,
   });
 
   factory AuthResult.success(UserModel user) =>
@@ -427,8 +594,20 @@ class AuthResult {
   factory AuthResult.failure(String message) =>
       AuthResult._(success: false, errorMessage: message);
 
+  /// Use this for all biometric-path failures so the ViewModel can switch
+  /// on [biometricError] instead of fragile string contains() checks.
+  factory AuthResult.biometricFailure(
+    BiometricAuthError error,
+    String message,
+  ) =>
+      AuthResult._(
+        success: false,
+        errorMessage: message,
+        biometricError: error,
+      );
+
   @override
   String toString() => success
       ? 'AuthResult.success(uid: ${user?.uid})'
-      : 'AuthResult.failure($errorMessage)';
+      : 'AuthResult.failure($errorMessage, biometricError: $biometricError)';
 }

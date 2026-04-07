@@ -18,6 +18,7 @@ import 'viewmodels/weather_viewmodel.dart';
 
 import 'views/auth/login_view.dart';
 import 'views/home_view.dart';
+import 'views/auth/onboarding_view.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -143,9 +144,14 @@ class AuthGate extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final authVM = context.watch<AuthViewModel>();
+    // Use select() instead of watch() to minimize rebuild scope —
+    // only rebuild when status actually changes, not on every
+    // AuthViewModel notifyListeners() call.
+    final status = context.select<AuthViewModel, AuthStatus>(
+      (vm) => vm.status,
+    );
 
-    switch (authVM.status) {
+    switch (status) {
       case AuthStatus.initial:
         return Scaffold(
           backgroundColor: Theme.of(context).scaffoldBackgroundColor,
@@ -157,7 +163,9 @@ class AuthGate extends StatelessWidget {
         );
 
       case AuthStatus.authenticated:
-        return const HomeView();
+        // Separate widget so UserViewModel watch is isolated —
+        // prevents AuthGate from rebuilding when UserViewModel changes.
+        return const _AuthenticatedGate();
 
       case AuthStatus.sessionExpired:
         return const LoginView(sessionExpired: true);
@@ -169,8 +177,25 @@ class AuthGate extends StatelessWidget {
   }
 }
 
+/// Isolated widget that only rebuilds when UserViewModel changes.
+/// Keeps it separate from AuthGate so the two watches don't interfere.
+class _AuthenticatedGate extends StatelessWidget {
+  const _AuthenticatedGate();
+
+  @override
+  Widget build(BuildContext context) {
+    final isProfileComplete = context.select<UserViewModel, bool>(
+      (uvm) => uvm.user?.isProfileComplete ?? true,
+    );
+
+    if (!isProfileComplete) {
+      return const OnboardingView();
+    }
+    return const HomeView();
+  }
+}
+
 // ── App Theme Colors Helper ───────────────────────────────────────────────────
-// Centralised so every view imports from one place (no new file needed).
 class AC {
   AC._();
 

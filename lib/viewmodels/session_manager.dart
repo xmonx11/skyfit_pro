@@ -10,12 +10,18 @@ import 'dart:async';
 class SessionManager {
   SessionManager({
     this.checkInterval = const Duration(seconds: 30),
+    this.activityDebounce = const Duration(seconds: 10),
     required this.isSessionExpired,
     required this.onSessionExpired,
   });
 
   /// How often the manager polls for expiry (default: every 30 s).
   final Duration checkInterval;
+
+  /// Minimum time between timer restarts on [recordActivity].
+  /// Prevents restarting the timer on every tap when the user is active.
+  /// Default: 10 seconds.
+  final Duration activityDebounce;
 
   /// Callback that returns `true` when the session has been inactive
   /// for more than 5 minutes. Typically delegates to StorageService /
@@ -29,6 +35,10 @@ class SessionManager {
   Timer? _timer;
   bool _isRunning = false;
 
+  /// Tracks when [recordActivity] last restarted the timer.
+  /// Prevents a timer restart on every single user tap.
+  DateTime? _lastActivityRecord;
+
   // ── Public API ─────────────────────────────────────────────────────────────
 
   /// Start (or restart) the inactivity timer.
@@ -40,9 +50,21 @@ class SessionManager {
   }
 
   /// Reset the timer because the user just interacted with the app.
-  /// Also refreshes the lastActivity timestamp via the supplied callback.
+  ///
+  /// Debounced by [activityDebounce] — if this is called more frequently
+  /// than the debounce window (e.g. on every scroll event), the timer is
+  /// only restarted once per window to avoid unnecessary overhead.
   void recordActivity() {
     if (!_isRunning) return;
+
+    final now = DateTime.now();
+    if (_lastActivityRecord != null &&
+        now.difference(_lastActivityRecord!) < activityDebounce) {
+      // Within debounce window — skip restart.
+      return;
+    }
+
+    _lastActivityRecord = now;
     start(); // cancel + restart = effective reset
   }
 

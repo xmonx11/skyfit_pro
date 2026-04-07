@@ -11,25 +11,26 @@ class SkySnackbar {
     SkySnackbarType type = SkySnackbarType.info,
     Duration duration = const Duration(seconds: 3),
   }) {
-    final overlay = ScaffoldMessenger.of(context);
-    overlay.hideCurrentSnackBar();
+    // ✅ FIX 1: Guard against unmounted / deactivated widget contexts
+    if (!context.mounted) return;
 
+    // ✅ FIX 2: Use maybeOf() so it returns null instead of throwing
+    //           when there's no Scaffold ancestor (off-screen widget)
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+
+    messenger.hideCurrentSnackBar();
     final config = _getConfig(type);
 
-    overlay.showSnackBar(
+    messenger.showSnackBar(
       SnackBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
         padding: EdgeInsets.zero,
         duration: duration,
-        behavior: SnackBarBehavior.floating,
-        // Positioned at the top
-        margin: EdgeInsets.only(
-          top: MediaQuery.of(context).padding.top + 12,
-          left: 16,
-          right: 16,
-          bottom: MediaQuery.of(context).size.height - 120,
-        ),
+        // ✅ FIX 3: Use fixed behavior — floating with large bottom margin
+        //           causes "presented off screen" on many devices
+        behavior: SnackBarBehavior.fixed,
         content: _SkySnackbarContent(
           message: message,
           icon: config.icon,

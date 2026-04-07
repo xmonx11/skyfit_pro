@@ -7,7 +7,6 @@ import 'session_manager.dart';
 class AuthViewModel extends ChangeNotifier {
   AuthViewModel({required AuthRepository authRepository})
       : _repo = authRepository {
-    // Wire SessionManager — delegates expiry check and callback here.
     _sessionManager = SessionManager(
       isSessionExpired: _repo.isSessionExpired,
       onSessionExpired: _onSessionExpired,
@@ -26,8 +25,13 @@ class AuthViewModel extends ChangeNotifier {
   bool _biometricsAvailable = false;
   bool _biometricLoginEnabled = false;
   bool _biometricButtonVisible = false;
-  String? _lastLoggedInName;
+  String? _lastLoggedInName = '';
   bool _forcedPasswordLogin = false;
+
+  // Tracks whether last login was Google (no stored password).
+  // Restored from storage on app restart so it survives cold starts and
+  // correctly drives the forced-login message and biometric re-auth path.
+  bool _isGoogleUser = false;
 
   int _biometricFailCount = 0;
   static const int _maxBiometricAttempts = 3;
@@ -35,6 +39,9 @@ class AuthViewModel extends ChangeNotifier {
   bool _isSigningIn = false;
   bool _isBiometricInProgress = false;
   bool _initCompleted = false;
+
+  // Guard to prevent notifyListeners() after dispose.
+  bool _disposed = false;
 
   // ── Getters ───────────────────────────────────────────────────────────────
 
@@ -53,6 +60,17 @@ class AuthViewModel extends ChangeNotifier {
       (_maxBiometricAttempts - _biometricFailCount)
           .clamp(0, _maxBiometricAttempts);
 
+  /// True if the last successful login was via Google.
+  /// Used by the UI to show "Sign in with Google" instead of
+  /// "Sign in with your password" when forced login is required.
+  bool get isGoogleUser => _isGoogleUser;
+
+  // ── Safe notify ───────────────────────────────────────────────────────────
+
+  void _notify() {
+    if (!_disposed) notifyListeners();
+  }
+
   // ── Init ──────────────────────────────────────────────────────────────────
 
   Future<void> _init() async {
@@ -65,6 +83,14 @@ class AuthViewModel extends ChangeNotifier {
     _biometricLoginEnabled = await _repo.isBiometricLoginEnabled();
     _lastLoggedInName = await _repo.getLastLoggedInName();
 
+    // Restore _isGoogleUser from persistent storage so the flag survives app
+    // restarts. Without this, after a cold start the flag is always false —
+    // meaning the forced-login banner shows the wrong message ("use your
+    // password") for Google users, and the biometric re-auth path doesn't know
+    // to use GoogleSignIn.signInSilently().
+    final storedProvider = await _repo.getStoredAuthProvider();
+    _isGoogleUser = storedProvider == 'google';
+
     if (!_biometricsAvailable && _biometricLoginEnabled) {
       _biometricLoginEnabled = false;
       await _repo.setBiometricLoginEnabled(false);
@@ -75,7 +101,7 @@ class AuthViewModel extends ChangeNotifier {
         (_lastLoggedInName != null);
 
     _isLoading = false;
-    notifyListeners();
+    _notify();
 
     final restored = await _repo.restoreSession();
 
@@ -87,12 +113,12 @@ class AuthViewModel extends ChangeNotifier {
     if (restored != null) {
       _currentUser = restored;
       _status = AuthStatus.authenticated;
-      notifyListeners();
-      _sessionManager.start(); // ← SessionManager starts here
+      _notify();
+      _sessionManager.start();
     } else {
       if (!_isSigningIn && !_isBiometricInProgress) {
         _status = AuthStatus.unauthenticated;
-        notifyListeners();
+        _notify();
       }
     }
 
@@ -109,29 +135,31 @@ class AuthViewModel extends ChangeNotifier {
     _isSigningIn = true;
     _forcedPasswordLogin = false;
     _biometricFailCount = 0;
+    _isGoogleUser = false;
 
     _errorMessage = null;
     _isLoading = true;
-    notifyListeners();
+    _notify();
 
     final result =
         await _repo.signInWithEmail(email: email, password: password);
 
     if (result.success) {
+      _isGoogleUser = false;
       await _refreshBiometricState();
       _currentUser = result.user!;
       _status = AuthStatus.authenticated;
       _isLoading = false;
       _isSigningIn = false;
-      notifyListeners();
-      _sessionManager.start(); // ← SessionManager starts after login
+      _notify();
+      _sessionManager.start();
       return true;
     } else {
       _errorMessage = result.errorMessage;
       _status = AuthStatus.unauthenticated;
       _isLoading = false;
       _isSigningIn = false;
-      notifyListeners();
+      _notify();
       return false;
     }
   }
@@ -151,7 +179,7 @@ class AuthViewModel extends ChangeNotifier {
 
     _errorMessage = null;
     _isLoading = true;
-    notifyListeners();
+    _notify();
 
     final result = await _repo.registerWithEmail(
       name: name,
@@ -169,14 +197,14 @@ class AuthViewModel extends ChangeNotifier {
       _status = AuthStatus.unauthenticated;
       _isSigningIn = false;
       _isLoading = false;
-      notifyListeners();
+      _notify();
       return true;
     } else {
       _errorMessage = result.errorMessage;
       _status = AuthStatus.unauthenticated;
       _isSigningIn = false;
       _isLoading = false;
-      notifyListeners();
+      _notify();
       return false;
     }
   }
@@ -186,10 +214,11 @@ class AuthViewModel extends ChangeNotifier {
   Future<bool> signInWithGoogle() async {
     if (_isSigningIn) return false;
     _isSigningIn = true;
+    _isGoogleUser = true;
 
     _errorMessage = null;
     _isLoading = true;
-    notifyListeners();
+    _notify();
 
     final result = await _repo.signInWithGoogle();
 
@@ -199,15 +228,16 @@ class AuthViewModel extends ChangeNotifier {
       _status = AuthStatus.authenticated;
       _isLoading = false;
       _isSigningIn = false;
-      notifyListeners();
-      _sessionManager.start(); // ← SessionManager starts after Google login
+      _notify();
+      _sessionManager.start();
       return true;
     } else {
+      _isGoogleUser = false;
       _errorMessage = result.errorMessage;
       _status = AuthStatus.unauthenticated;
       _isLoading = false;
       _isSigningIn = false;
-      notifyListeners();
+      _notify();
       return false;
     }
   }
@@ -217,13 +247,15 @@ class AuthViewModel extends ChangeNotifier {
   Future<bool> signInWithBiometrics() async {
     if (!_biometricButtonVisible) {
       _errorMessage = 'Biometric login is not available.';
-      notifyListeners();
+      _notify();
       return false;
     }
 
     if (_forcedPasswordLogin) {
-      _errorMessage = 'Please sign in with your password.';
-      notifyListeners();
+      _errorMessage = _isGoogleUser
+          ? 'Please sign in with Google to continue.'
+          : 'Please sign in with your password.';
+      _notify();
       return false;
     }
 
@@ -233,7 +265,7 @@ class AuthViewModel extends ChangeNotifier {
 
     _isLoading = true;
     _errorMessage = null;
-    notifyListeners();
+    _notify();
 
     try {
       final result = await _repo.authenticateWithBiometrics();
@@ -242,37 +274,42 @@ class AuthViewModel extends ChangeNotifier {
         _biometricFailCount = 0;
         _forcedPasswordLogin = false;
 
-        _biometricsAvailable = await _repo.isBiometricLoginAvailable();
-        _biometricLoginEnabled = await _repo.isBiometricLoginEnabled();
-        _lastLoggedInName = await _repo.getLastLoggedInName();
-        _biometricButtonVisible = _biometricsAvailable &&
-            _biometricLoginEnabled &&
-            (_lastLoggedInName != null);
+        await _refreshBiometricState();
 
         _isBiometricInProgress = false;
         _isSigningIn = false;
         _currentUser = result.user!;
         _isLoading = false;
         _status = AuthStatus.authenticated;
-        notifyListeners();
+        _notify();
 
-        _sessionManager.start(); // ← SessionManager starts after biometric
+        _sessionManager.start();
         return true;
       } else {
-        final msg = result.errorMessage?.toLowerCase() ?? '';
+        // Use typed BiometricAuthError — no fragile string matching.
+        final error = result.biometricError;
 
-        final isCancelled = msg.contains('cancel') ||
-            msg.contains('not successful') ||
-            result.errorMessage == null;
+        final isCancelled = error == BiometricAuthError.cancelled ||
+            error == BiometricAuthError.failed && result.errorMessage == null;
 
-        final isCredentialError = msg.contains('no saved') ||
-            msg.contains('no account') ||
-            msg.contains('session expired') ||
-            msg.contains('profile not found') ||
-            msg.contains('saved credentials') ||
-            msg.contains('saved account');
+        final isCredentialError =
+            error == BiometricAuthError.googleSessionExpired ||
+                error == BiometricAuthError.sessionExpired ||
+                error == BiometricAuthError.noSavedCredentials ||
+                error == BiometricAuthError.noSavedAccount ||
+                error == BiometricAuthError.profileNotFound;
 
-        if (!isCancelled && !isCredentialError) {
+        final isHardwareError = error == BiometricAuthError.notAvailable ||
+            error == BiometricAuthError.notEnrolled;
+
+        final isLockedOut = error == BiometricAuthError.lockedOut;
+
+        // Only count as a strike if it's a real failed attempt —
+        // not a cancel, not a credential/hardware/lockout error.
+        if (!isCancelled &&
+            !isCredentialError &&
+            !isHardwareError &&
+            !isLockedOut) {
           _biometricFailCount++;
         }
 
@@ -281,22 +318,40 @@ class AuthViewModel extends ChangeNotifier {
         _isLoading = false;
 
         if (isCredentialError) {
+          // Hide biometric button — no valid credentials/session stored.
+          // User must do a full login (email or Google) before biometric works.
+          _biometricButtonVisible = false;
+
+          // If Google session expired, mark as Google user so the UI shows
+          // the correct forced-login message. Also restored from storage in
+          // _init() but set explicitly here for within-session occurrences.
+          if (error == BiometricAuthError.googleSessionExpired) {
+            _isGoogleUser = true;
+          }
+
+          _errorMessage = result.errorMessage;
+        } else if (isLockedOut) {
+          // Device-level lockout — force password/Google login.
+          _forcedPasswordLogin = true;
+          _biometricButtonVisible = false;
           _errorMessage = result.errorMessage;
         } else if (_biometricFailCount >= _maxBiometricAttempts) {
           _forcedPasswordLogin = true;
           _biometricButtonVisible = false;
-          _errorMessage =
-              'Too many failed attempts. Please sign in with your password.';
+          // Show provider-appropriate message.
+          _errorMessage = _isGoogleUser
+              ? 'Too many failed attempts. Please sign in with Google.'
+              : 'Too many failed attempts. Please sign in with your password.';
         } else if (!isCancelled) {
           final remaining = biometricAttemptsRemaining;
-          _errorMessage =
-              '${result.errorMessage ?? 'Biometric failed.'} '
+          _errorMessage = '${result.errorMessage ?? 'Biometric failed.'} '
               '$remaining attempt${remaining == 1 ? '' : 's'} remaining.';
         } else {
+          // User cancelled — clear error silently.
           _errorMessage = null;
         }
 
-        notifyListeners();
+        _notify();
         return false;
       }
     } catch (e) {
@@ -304,7 +359,7 @@ class AuthViewModel extends ChangeNotifier {
       _isSigningIn = false;
       _isLoading = false;
       _errorMessage = 'Biometric error: ${e.toString()}';
-      notifyListeners();
+      _notify();
       return false;
     }
   }
@@ -314,13 +369,13 @@ class AuthViewModel extends ChangeNotifier {
   Future<bool> sendPasswordReset(String email) async {
     _isLoading = true;
     _errorMessage = null;
-    notifyListeners();
+    _notify();
 
     final result = await _repo.sendPasswordResetEmail(email);
 
     _isLoading = false;
     if (!result.success) _errorMessage = result.errorMessage;
-    notifyListeners();
+    _notify();
     return result.success;
   }
 
@@ -337,44 +392,47 @@ class AuthViewModel extends ChangeNotifier {
       _forcedPasswordLogin = false;
       _biometricFailCount = 0;
     }
-    notifyListeners();
+    _notify();
   }
 
   // ── Session / Activity ────────────────────────────────────────────────────
 
-  /// Called on every user tap/scroll (wired via Listener in HomeView).
-  /// Delegates to SessionManager which resets the inactivity timer.
   void recordActivity() {
     if (!isAuthenticated) return;
     _repo.refreshSession();
-    _sessionManager.recordActivity(); // ← SessionManager resets timer
+    _sessionManager.recordActivity();
   }
 
   // ── Sign-Out ──────────────────────────────────────────────────────────────
 
   Future<void> signOut() async {
-    _sessionManager.cancel(); // ← SessionManager stopped on sign-out
+    _sessionManager.cancel();
     _isSigningIn = false;
     _isBiometricInProgress = false;
+
+    // Do NOT reset _isGoogleUser to false on sign-out.
+    // The flag must survive sign-out so that on next app open (before
+    // _init() restores it from storage) the UI still shows the correct
+    // forced-login message if biometric re-auth fails.
+    // _isGoogleUser is reset only on a successful email sign-in,
+    // or when Google sign-in itself fails.
 
     await _repo.signOut();
 
     _currentUser = null;
     _status = AuthStatus.unauthenticated;
     _isLoading = false;
-    notifyListeners();
+    _notify();
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────
 
-  /// Called by SessionManager when the 5-min inactivity timeout fires.
-  /// Sets status to sessionExpired → AuthGate rebuilds → LoginView shown.
   Future<void> _onSessionExpired() async {
     if (!isAuthenticated || _isSigningIn || _isBiometricInProgress) return;
     _currentUser = null;
     _status = AuthStatus.sessionExpired;
     _isLoading = false;
-    notifyListeners();
+    _notify();
   }
 
   void _setStatus(AuthStatus status) {
@@ -384,17 +442,17 @@ class AuthViewModel extends ChangeNotifier {
       return;
     }
     _status = status;
-    notifyListeners();
+    _notify();
   }
 
   void _setLoading(bool loading) {
     _isLoading = loading;
-    notifyListeners();
+    _notify();
   }
 
   void _setError(String message) {
     _errorMessage = message;
-    notifyListeners();
+    _notify();
   }
 
   void _clearError() {
@@ -407,6 +465,7 @@ class AuthViewModel extends ChangeNotifier {
     _forcedPasswordLogin = false;
     _isSigningIn = false;
     _isBiometricInProgress = false;
+    _isGoogleUser = false;
     _sessionManager.cancel();
     _setStatus(AuthStatus.unauthenticated);
   }
@@ -418,12 +477,13 @@ class AuthViewModel extends ChangeNotifier {
     _biometricButtonVisible = _biometricsAvailable &&
         _biometricLoginEnabled &&
         (_lastLoggedInName != null);
-    notifyListeners();
+    _notify();
   }
 
   @override
   void dispose() {
-    _sessionManager.cancel(); // ← always clean up
+    _disposed = true;
+    _sessionManager.cancel();
     super.dispose();
   }
 }

@@ -398,11 +398,64 @@ class _LoginViewState extends State<LoginView>
                                     ),
                                   ),
 
-                                  // Biometrics button
+                                  // Biometrics section
                                   Consumer<AuthViewModel>(
                                     builder: (_, vm, __) {
-                                      if (!vm.biometricButtonVisible ||
-                                          vm.forcedPasswordLogin) {
+                                      // Show forced-login banner when biometric
+                                      // is locked out due to too many failures
+                                      // or credential/session errors.
+                                      if (vm.forcedPasswordLogin) {
+                                        return Padding(
+                                          padding: EdgeInsets.only(top: dp(14)),
+                                          child: Container(
+                                            width: double.infinity,
+                                            padding: EdgeInsets.symmetric(
+                                              horizontal: dp(14),
+                                              vertical: dp(10),
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFFFFAA44)
+                                                  .withOpacity(0.10),
+                                              borderRadius:
+                                                  BorderRadius.circular(dp(10)),
+                                              border: Border.all(
+                                                color: const Color(0xFFFFAA44)
+                                                    .withOpacity(0.35),
+                                              ),
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                Icon(
+                                                  Icons.warning_amber_rounded,
+                                                  color:
+                                                      const Color(0xFFFFAA44),
+                                                  size: dp(16),
+                                                ),
+                                                SizedBox(width: dp(8)),
+                                                Expanded(
+                                                  child: Text(
+                                                    // Provider-aware message —
+                                                    // Google users have no password.
+                                                    vm.isGoogleUser
+                                                        ? 'Please sign in with Google to continue.'
+                                                        : 'Please sign in with your password to continue.',
+                                                    style: TextStyle(
+                                                      color: const Color(
+                                                          0xFFFFAA44),
+                                                      fontSize: sp(11.5),
+                                                      fontWeight:
+                                                          FontWeight.w500,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        );
+                                      }
+
+                                      // Hide biometric button if not visible.
+                                      if (!vm.biometricButtonVisible) {
                                         return const SizedBox.shrink();
                                       }
 

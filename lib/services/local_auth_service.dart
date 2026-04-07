@@ -2,6 +2,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:local_auth/local_auth.dart';
 
+import '../repositories/auth_repository.dart';
+
 /// Wraps the `local_auth` package to provide biometric / device-credential
 /// authentication. Returns typed results so callers never deal with raw
 /// plugin exceptions.
@@ -144,14 +146,6 @@ class LocalAuthService {
 }
 
 // ── Result types ──────────────────────────────────────────────────────────────
-
-enum BiometricAuthError {
-  notAvailable,
-  notEnrolled,
-  lockedOut,
-  failed,
-  unknown,
-}
 
 class BiometricAuthResult {
   final bool success;

@@ -78,6 +78,7 @@ class UserViewModel extends ChangeNotifier {
 
   bool get isProfileComplete =>
       _user != null &&
+      _user!.isProfileComplete && // ← uses the Firestore flag
       _user!.age > 0 &&
       _user!.weightKg > 0 &&
       _user!.heightCm > 0;
@@ -101,16 +102,11 @@ class UserViewModel extends ChangeNotifier {
 
     // New user or stream died — seed immediately so UI has something to show,
     // then open the real-time stream AND do an explicit one-shot fetch.
-    // The one-shot fetch is the web safety net: on web, Firestore's real-time
-    // snapshots() can silently fail to deliver the first event if the auth
-    // token hasn't propagated to the SDK yet (race between Firebase Auth and
-    // Firestore on the web platform). The explicit getUser() call goes through
-    // a fresh HTTP request that always picks up the current token.
     _user = authUser;
     notifyListeners();
 
     _subscribeToProfile(authUser.uid);
-    _loadProfileOnce(authUser.uid); // web-safe fallback
+    _loadProfileOnce(authUser.uid);
   }
 
   // ── Profile operations ────────────────────────────────────────────────────
@@ -121,9 +117,6 @@ class UserViewModel extends ChangeNotifier {
     try {
       final profile = await _firestore.getUser(uid);
       if (profile != null && _subscribedUid == uid) {
-        // Only update if the stream hasn't already delivered a fresher copy.
-        // Compare updatedAt so we never downgrade a stream-delivered document
-        // with a stale HTTP response.
         final currentUpdatedAt = _user?.updatedAt;
         final fetchedUpdatedAt = profile.updatedAt;
         final shouldUpdate = currentUpdatedAt == null ||
@@ -137,8 +130,6 @@ class UserViewModel extends ChangeNotifier {
         }
       }
     } catch (e) {
-      // Non-fatal on web — the real-time stream may still deliver.
-      // Only surface the error if we still have no user after the fetch.
       if (_user?.uid == uid && _profileStatus != UserProfileStatus.loaded) {
         _errorMessage = 'Failed to load profile: ${e.toString()}';
         _profileStatus = UserProfileStatus.error;
@@ -163,12 +154,14 @@ class UserViewModel extends ChangeNotifier {
     }
   }
 
+  // ← UPDATED: added isProfileComplete parameter
   Future<bool> updateProfile({
     String? displayName,
     int? age,
     double? weightKg,
     double? heightCm,
     String? fitnessGoal,
+    bool? isProfileComplete, // ← ADDED
   }) async {
     if (_user == null) return false;
 
@@ -182,6 +175,7 @@ class UserViewModel extends ChangeNotifier {
     if (weightKg != null) updates['weightKg'] = weightKg;
     if (heightCm != null) updates['heightCm'] = heightCm;
     if (fitnessGoal != null) updates['fitnessGoal'] = fitnessGoal;
+    if (isProfileComplete != null) updates['isProfileComplete'] = isProfileComplete; // ← ADDED
 
     if (updates.isEmpty) {
       _isUpdating = false;
@@ -200,6 +194,7 @@ class UserViewModel extends ChangeNotifier {
         weightKg: weightKg,
         heightCm: heightCm,
         fitnessGoal: fitnessGoal,
+        isProfileComplete: isProfileComplete, // ← ADDED
         updatedAt: DateTime.now(),
       );
 
@@ -286,8 +281,6 @@ class UserViewModel extends ChangeNotifier {
         }
       },
       onError: (e) {
-        // On web this can be a Firestore permission error that surfaces here
-        // instead of throwing. Log it and surface to UI.
         _setError('Profile sync error: ${e.toString()}');
       },
     );

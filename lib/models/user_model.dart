@@ -7,8 +7,9 @@ class UserModel {
   final String? photoUrl;
   final int age;
   final double weightKg;
-  final double heightCm; // ✅ Required for BMI calculation
+  final double heightCm;
   final String? fitnessGoal;
+  final bool isProfileComplete; // ← ADDED
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -21,6 +22,7 @@ class UserModel {
     required this.weightKg,
     required this.heightCm,
     this.fitnessGoal,
+    this.isProfileComplete = false, // ← ADDED (default false)
     required this.createdAt,
     required this.updatedAt,
   });
@@ -82,10 +84,9 @@ class UserModel {
       photoUrl: data['photoUrl'] as String?,
       age: (data['age'] as num).toInt(),
       weightKg: (data['weightKg'] as num).toDouble(),
-      // ✅ FIXED: Default 0.0 so BMI returns 0 and isProfileComplete = false
-      // when height has not been set yet. Previously 170.0 caused misleading BMI.
       heightCm: (data['heightCm'] as num?)?.toDouble() ?? 0.0,
       fitnessGoal: data['fitnessGoal'] as String?,
+      isProfileComplete: data['isProfileComplete'] as bool? ?? false, // ← ADDED
       createdAt: (data['createdAt'] as Timestamp).toDate(),
       updatedAt: (data['updatedAt'] as Timestamp).toDate(),
     );
@@ -99,9 +100,9 @@ class UserModel {
       photoUrl: map['photoUrl'] as String?,
       age: (map['age'] as num).toInt(),
       weightKg: (map['weightKg'] as num).toDouble(),
-      // ✅ FIXED: Default 0.0 — same reasoning as fromFirestore above.
       heightCm: (map['heightCm'] as num?)?.toDouble() ?? 0.0,
       fitnessGoal: map['fitnessGoal'] as String?,
+      isProfileComplete: map['isProfileComplete'] as bool? ?? false, // ← ADDED
       createdAt: map['createdAt'] is Timestamp
           ? (map['createdAt'] as Timestamp).toDate()
           : DateTime.parse(map['createdAt'] as String),
@@ -121,6 +122,7 @@ class UserModel {
       'weightKg': weightKg,
       'heightCm': heightCm,
       'fitnessGoal': fitnessGoal,
+      'isProfileComplete': isProfileComplete, // ← ADDED
       'createdAt': Timestamp.fromDate(createdAt),
       'updatedAt': Timestamp.fromDate(updatedAt),
     };
@@ -135,6 +137,7 @@ class UserModel {
     double? weightKg,
     double? heightCm,
     String? fitnessGoal,
+    bool? isProfileComplete, // ← ADDED
     DateTime? createdAt,
     DateTime? updatedAt,
   }) {
@@ -147,6 +150,7 @@ class UserModel {
       weightKg: weightKg ?? this.weightKg,
       heightCm: heightCm ?? this.heightCm,
       fitnessGoal: fitnessGoal ?? this.fitnessGoal,
+      isProfileComplete: isProfileComplete ?? this.isProfileComplete, // ← ADDED
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
     );
@@ -154,7 +158,7 @@ class UserModel {
 
   @override
   String toString() =>
-      'UserModel(uid: $uid, name: $displayName, age: $age, bmi: ${bmi.toStringAsFixed(1)}, category: ${weightCategory?.name ?? 'unknown'})';
+      'UserModel(uid: $uid, name: $displayName, age: $age, bmi: ${bmi.toStringAsFixed(1)}, category: ${weightCategory?.name ?? 'unknown'}, isProfileComplete: $isProfileComplete)';
 }
 
 // ── Weight Category Enum ──────────────────────────────────────────────────────
