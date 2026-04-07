@@ -20,7 +20,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 substitutions:
-  _REGION: us-central1
+  _REGION: asia-southeast1   
   _SERVICE_NAME: skyfit-pro
   _REPO_NAME: skyfit-pro-repo
   _IMAGE: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO_NAME}/${_SERVICE_NAME}
