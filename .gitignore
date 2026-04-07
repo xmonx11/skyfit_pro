@@ -51,7 +51,6 @@ app.*.map.json
 env.json
 env.*.json
 
-# Firebase config — never commit (inject via --dart-define at build time)
-lib/firebase_options.dart
+
 google-services.json
 GoogleService-Info.plist
