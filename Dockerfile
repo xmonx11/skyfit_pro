@@ -1,52 +1,58 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 1 — Build Flutter Web
-# ─────────────────────────────────────────────────────────────────────────────
-FROM ghcr.io/cirruslabs/flutter:3.27.3 AS builder
+name: Build and Deploy to Cloud Run
 
-WORKDIR /app
+on:
+  push:
+    branches: [main]
 
-# Copy dependency files first (layer caching)
-COPY pubspec.yaml pubspec.lock ./
-RUN flutter pub get
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
 
-# Copy source
-COPY . .
+    steps:
+      - uses: actions/checkout@v4
 
-# Build with --dart-define-from-file or individual defines passed at build time.
-# CI/CD injects ARG values; they become available as --dart-define flags.
-ARG OPENWEATHER_API_KEY=""
-ARG FIREBASE_API_KEY=""
-ARG FIREBASE_AUTH_DOMAIN=""
-ARG FIREBASE_PROJECT_ID=""
-ARG FIREBASE_STORAGE_BUCKET=""
-ARG FIREBASE_MESSAGING_SENDER_ID=""
-ARG FIREBASE_APP_ID=""
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-RUN flutter build web --release \
-    --dart-define=OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY} \
-    --dart-define=FIREBASE_API_KEY=${FIREBASE_API_KEY} \
-    --dart-define=FIREBASE_AUTH_DOMAIN=${FIREBASE_AUTH_DOMAIN} \
-    --dart-define=FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID} \
-    --dart-define=FIREBASE_STORAGE_BUCKET=${FIREBASE_STORAGE_BUCKET} \
-    --dart-define=FIREBASE_MESSAGING_SENDER_ID=${FIREBASE_MESSAGING_SENDER_ID} \
-    --dart-define=FIREBASE_APP_ID=${FIREBASE_APP_ID}
+      - name: Get secrets from Secret Manager
+        id: secrets
+        uses: google-github-actions/get-secretmanager-secrets@v2
+        with:
+          secrets: |-
+            FIREBASE_API_KEY:skyfitpro-b293c/FIREBASE_API_KEY
+            FIREBASE_APP_ID:skyfitpro-b293c/FIREBASE_APP_ID
+            FIREBASE_AUTH_DOMAIN:skyfitpro-b293c/FIREBASE_AUTH_DOMAIN
+            FIREBASE_PROJECT_ID:skyfitpro-b293c/FIREBASE_PROJECT_ID
+            FIREBASE_STORAGE_BUCKET:skyfitpro-b293c/FIREBASE_STORAGE_BUCKET
+            FIREBASE_MESSAGING_SENDER_ID:skyfitpro-b293c/FIREBASE_MESSAGING_SENDER_ID
+            OPENWEATHER_API_KEY:skyfitpro-b293c/OPENWEATHER_API_KEY
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 2 — Serve with Nginx
-# ─────────────────────────────────────────────────────────────────────────────
-FROM nginx:1.27-alpine AS runner
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-# Remove default Nginx config
-RUN rm /etc/nginx/conf.d/default.conf
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker asia-southeast1-docker.pkg.dev --quiet
 
-# Copy custom Nginx config
-COPY nginx.conf /etc/nginx/conf.d/skyfit.conf
+      - name: Build and Push Docker Image
+        run: |
+          docker build \
+            --build-arg FIREBASE_API_KEY=${{ steps.secrets.outputs.FIREBASE_API_KEY }} \
+            --build-arg FIREBASE_AUTH_DOMAIN=${{ steps.secrets.outputs.FIREBASE_AUTH_DOMAIN }} \
+            --build-arg FIREBASE_PROJECT_ID=${{ steps.secrets.outputs.FIREBASE_PROJECT_ID }} \
+            --build-arg FIREBASE_STORAGE_BUCKET=${{ steps.secrets.outputs.FIREBASE_STORAGE_BUCKET }} \
+            --build-arg FIREBASE_MESSAGING_SENDER_ID=${{ steps.secrets.outputs.FIREBASE_MESSAGING_SENDER_ID }} \
+            --build-arg FIREBASE_APP_ID=${{ steps.secrets.outputs.FIREBASE_APP_ID }} \
+            --build-arg OPENWEATHER_API_KEY=${{ steps.secrets.outputs.OPENWEATHER_API_KEY }} \
+            -t asia-southeast1-docker.pkg.dev/skyfitpro-b293c/skyfit-pro/app:${{ github.sha }} \
+            .
+          docker push asia-southeast1-docker.pkg.dev/skyfitpro-b293c/skyfit-pro/app:${{ github.sha }}
 
-# Copy built Flutter web app
-COPY --from=builder /app/build/web /usr/share/nginx/html
-
-# Expose port 8080 (Cloud Run requirement)
-EXPOSE 8080
-
-# Run Nginx in foreground
-CMD ["nginx", "-g", "daemon off;"]
+      - name: Deploy to Cloud Run
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: skyfit-pro
+          region: asia-southeast1
+          image: asia-southeast1-docker.pkg.dev/skyfitpro-b293c/skyfit-pro/app:${{ github.sha }}
+          project_id: skyfitpro-b293c
