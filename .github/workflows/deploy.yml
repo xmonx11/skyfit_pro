@@ -29,29 +29,30 @@ jobs:
             FIREBASE_MESSAGING_SENDER_ID:skyfitpro-b293c/FIREBASE_MESSAGING_SENDER_ID
             OPENWEATHER_API_KEY:skyfitpro-b293c/OPENWEATHER_API_KEY
 
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.x'
-          channel: stable
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Install dependencies
-        run: flutter pub get
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker asia-southeast1-docker.pkg.dev --quiet
 
-      - name: Build Flutter Web
+      - name: Build and Push Docker Image
         run: |
-          flutter build web \
-            --dart-define=FIREBASE_API_KEY=${{ steps.secrets.outputs.FIREBASE_API_KEY }} \
-            --dart-define=FIREBASE_AUTH_DOMAIN=${{ steps.secrets.outputs.FIREBASE_AUTH_DOMAIN }} \
-            --dart-define=FIREBASE_PROJECT_ID=${{ steps.secrets.outputs.FIREBASE_PROJECT_ID }} \
-            --dart-define=FIREBASE_STORAGE_BUCKET=${{ steps.secrets.outputs.FIREBASE_STORAGE_BUCKET }} \
-            --dart-define=FIREBASE_MESSAGING_SENDER_ID=${{ steps.secrets.outputs.FIREBASE_MESSAGING_SENDER_ID }} \
-            --dart-define=FIREBASE_APP_ID=${{ steps.secrets.outputs.FIREBASE_APP_ID }} \
-            --dart-define=OPENWEATHER_API_KEY=${{ steps.secrets.outputs.OPENWEATHER_API_KEY }}
+          docker build \
+            --build-arg FIREBASE_API_KEY=${{ steps.secrets.outputs.FIREBASE_API_KEY }} \
+            --build-arg FIREBASE_AUTH_DOMAIN=${{ steps.secrets.outputs.FIREBASE_AUTH_DOMAIN }} \
+            --build-arg FIREBASE_PROJECT_ID=${{ steps.secrets.outputs.FIREBASE_PROJECT_ID }} \
+            --build-arg FIREBASE_STORAGE_BUCKET=${{ steps.secrets.outputs.FIREBASE_STORAGE_BUCKET }} \
+            --build-arg FIREBASE_MESSAGING_SENDER_ID=${{ steps.secrets.outputs.FIREBASE_MESSAGING_SENDER_ID }} \
+            --build-arg FIREBASE_APP_ID=${{ steps.secrets.outputs.FIREBASE_APP_ID }} \
+            --build-arg OPENWEATHER_API_KEY=${{ steps.secrets.outputs.OPENWEATHER_API_KEY }} \
+            -t asia-southeast1-docker.pkg.dev/skyfitpro-b293c/skyfit-pro/app:${{ github.sha }} \
+            .
+          docker push asia-southeast1-docker.pkg.dev/skyfitpro-b293c/skyfit-pro/app:${{ github.sha }}
 
       - name: Deploy to Cloud Run
         uses: google-github-actions/deploy-cloudrun@v2
         with:
           service: skyfit-pro
           region: asia-southeast1
-          source: .
+          image: asia-southeast1-docker.pkg.dev/skyfitpro-b293c/skyfit-pro/app:${{ github.sha }}
           project_id: skyfitpro-b293c
